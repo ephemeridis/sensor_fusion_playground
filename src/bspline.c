@@ -2,20 +2,49 @@
 
 #include <stdlib.h>
 
+// the fixed scratch buffers are sized for BSPLINE_MAX_DEGREE, so every
+// entry point must reject a spline whose degree exceeds that cap
+static bool bspline_degree_ok(const bspline_t *spline) {
+  return spline->p >= 0 && spline->p <= BSPLINE_MAX_DEGREE;
+}
+
 bool bspline_init(bspline_t *spline, int p, int n, int k) {
+  if (spline == NULL) return false;
+  if (p < 1 || p > BSPLINE_MAX_DEGREE) return false;
+  if (n <= 0 || k < 0) return false;
+
   spline->p = p;
   spline->n = n;
   spline->k = k;
-
+  spline->U = NULL;
   spline->heap_alloc = true;
 
-  spline->m = n + p + k + 1;
-  spline->U = malloc(sizeof(double) * spline->m);
+  spline->m = BSPLINE_KNOTS_LEN(p, n, k);
+  spline->U = malloc(sizeof(bspl_scalar_t) * (size_t)spline->m);
   if (spline->U == NULL) {
     bspline_free(spline);
     return false;
   }
-  spline->heap_alloc = true;
+
+  return true;
+}
+
+// wraps a caller-provided knot buffer; no allocation is performed.
+// bspline_free on a matrix initialised this way is a no-op.
+bool bspline_init_static(bspline_t *spline, int p, int n, int k,
+                         bspl_scalar_t *U_buf, size_t U_len) {
+  if (spline == NULL || U_buf == NULL) return false;
+  if (p < 1 || p > BSPLINE_MAX_DEGREE) return false;
+  if (n <= 0 || k < 0) return false;
+  // the caller's buffer must be large enough for the whole knot vector
+  if (U_len < (size_t)BSPLINE_KNOTS_LEN(p, n, k)) return false;
+
+  spline->p = p;
+  spline->n = n;
+  spline->k = k;
+  spline->m = BSPLINE_KNOTS_LEN(p, n, k);
+  spline->U = U_buf;
+  spline->heap_alloc = false;
 
   return true;
 }
@@ -27,8 +56,9 @@ void bspline_free(bspline_t *spline) {
   }
 }
 
-int bspline_find_span(double u, bspline_t *spline) {
+int bspline_find_span(bspl_scalar_t u, bspline_t *spline) {
   if (spline == NULL) return -1;
+  if (spline->U == NULL) return -1;
 
   int last = spline->m - spline->p - 2;
   if (u >= spline->U[last+1]) return last;        // end of domain
@@ -48,12 +78,14 @@ int bspline_find_span(double u, bspline_t *spline) {
 }
 
 // algorithm A2.2 from the NURBS book
-void bspline_basis_funcs(int i, double u, bspline_t *spline, double *N, size_t len_N) {
+void bspline_basis_funcs(int i, bspl_scalar_t u, bspline_t *spline,
+                         bspl_scalar_t *N, size_t len_N) {
   if (spline == NULL) return;
-  if (spline->U == NULL || N == NULL || len_N < spline->p+1) return;
+  if (spline->U == NULL || N == NULL || len_N < (size_t)(spline->p+1)) return;
+  if (!bspline_degree_ok(spline)) return;
 
   // store values to reduce repeat computation
-  double left[BSPLINE_MAX_DEGREE], right[BSPLINE_MAX_DEGREE];
+  bspl_scalar_t left[BSPLINE_MAX_DEGREE], right[BSPLINE_MAX_DEGREE];
 
   // initial zero-th order basis function
   N[0] = 1.0;
@@ -61,9 +93,9 @@ void bspline_basis_funcs(int i, double u, bspline_t *spline, double *N, size_t l
     // each loop computes one more degree of the basis function
     left[j] = u - spline->U[i-j];
     right[j] = spline->U[i+j+1] - u;
-    double saved = 0.0;
+    bspl_scalar_t saved = 0.0;
     for (int r = 0; r <= j; r++) {
-      double tmp = N[r] / (right[r] + left[j-r]);
+      bspl_scalar_t tmp = N[r] / (right[r] + left[j-r]);
       N[r] = saved + right[r]*tmp;
       saved = left[j-r]*tmp;
     }
@@ -78,15 +110,17 @@ void bspline_basis_funcs(int i, double u, bspline_t *spline, double *N, size_t l
 // modified to store the knot differences in the lower triangle and the
 // basis functions in the upper triangle, to be used in A2.3 for computing derivatives
 void bspline_basis_funcs_store_ndu(
-  int i, double u, bspline_t *spline, double *ndu_out, size_t rows_ndu_out, size_t stride_ndu_out) {
+  int i, bspl_scalar_t u, bspline_t *spline,
+  bspl_scalar_t *ndu_out, size_t rows_ndu_out, size_t stride_ndu_out) {
   if (spline == NULL) return;
   if (spline->U == NULL || ndu_out == NULL) return;
+  if (!bspline_degree_ok(spline)) return;
   if (rows_ndu_out < (size_t)(spline->p+1) || stride_ndu_out != (size_t)(spline->p+1)) return;
 
   const size_t s = stride_ndu_out;
 
   // store values to reduce repeat computation
-  double left[BSPLINE_MAX_DEGREE], right[BSPLINE_MAX_DEGREE];
+  bspl_scalar_t left[BSPLINE_MAX_DEGREE], right[BSPLINE_MAX_DEGREE];
 
   // initial zero-th order basis function
   ndu_out[INDEX_BUF(0, 0, s)] = 1.0;
@@ -94,12 +128,12 @@ void bspline_basis_funcs_store_ndu(
     // each loop computes one more degree of the basis function
     left[j] = u - spline->U[i-j];
     right[j] = spline->U[i+j+1] - u;
-    double saved = 0.0;
+    bspl_scalar_t saved = 0.0;
     for (int r = 0; r <= j; r++) {
       // compute knot differences in lower triangle
       // row j+1 means "a difference spanning j+1 knots"
       ndu_out[INDEX_BUF(j+1, r, s)] = right[r] + left[j-r];
-      double tmp = ndu_out[INDEX_BUF(r, j, s)] / ndu_out[INDEX_BUF(j+1, r, s)];
+      bspl_scalar_t tmp = ndu_out[INDEX_BUF(r, j, s)] / ndu_out[INDEX_BUF(j+1, r, s)];
 
       // compute basis functions in upper triangle
       // note: reads column j (degree j), writes column j+1
@@ -114,14 +148,17 @@ void bspline_basis_funcs_store_ndu(
 
 // algorithm A2.3 from the NURBS book
 // use the _use_ndu form directly if you already have an ndu.
-void bspline_basis_derivs(int i, double u, int N_derivs, bspline_t *spline, double *deriv_out, size_t rows_deriv_out, size_t stride_deriv_out) {
+void bspline_basis_derivs(int i, bspl_scalar_t u, int N_derivs, bspline_t *spline,
+                          bspl_scalar_t *deriv_out, size_t rows_deriv_out, size_t stride_deriv_out) {
   if (spline == NULL) return;
   if (spline->U == NULL || deriv_out == NULL) return;
   if (spline->p < 1 || N_derivs < 0) return;
+  if (!bspline_degree_ok(spline)) return;
   if (rows_deriv_out < (size_t)(N_derivs+1) || stride_deriv_out != (size_t)(spline->p+1)) return;
 
   const size_t stride_ndu = (size_t)(spline->p + 1);
-  double ndu[BSPLINE_MAX_ORDER * BSPLINE_MAX_ORDER];
+  // sized for the worst case; only the leading (p+1)x(p+1) block is used
+  bspl_scalar_t ndu[BSPLINE_MAX_ORDER * BSPLINE_MAX_ORDER];
 
   bspline_basis_funcs_store_ndu(i, u, spline, ndu, stride_ndu, stride_ndu);
   bspline_basis_derivs_use_ndu(i, u, N_derivs, spline,
@@ -130,12 +167,13 @@ void bspline_basis_derivs(int i, double u, int N_derivs, bspline_t *spline, doub
 }
 
 void bspline_basis_derivs_use_ndu(
-  int i, double u, int N_derivs, bspline_t *spline,
-  double *deriv_out, size_t rows_deriv_out, size_t stride_deriv_out,
-  double *ndu_in, size_t rows_ndu_in, size_t stride_ndu_in) {
+  int i, bspl_scalar_t u, int N_derivs, bspline_t *spline,
+  bspl_scalar_t *deriv_out, size_t rows_deriv_out, size_t stride_deriv_out,
+  bspl_scalar_t *ndu_in, size_t rows_ndu_in, size_t stride_ndu_in) {
   (void)i; (void)u;  // everything needed is already baked into ndu_in
   if (spline == NULL) return;
   if (spline->U == NULL || deriv_out == NULL || ndu_in == NULL) return;
+  if (!bspline_degree_ok(spline)) return;
   if (rows_deriv_out < (size_t)(N_derivs+1) || stride_deriv_out != (size_t)(spline->p+1)) return;
   if (rows_ndu_in < (size_t)(spline->p+1) || stride_ndu_in != (size_t)(spline->p+1)) return;
 
@@ -161,7 +199,7 @@ void bspline_basis_derivs_use_ndu(
   // compute the derivatives
   // from Eq. 2.9: the kth derivative is a weighted sum of k+1 basis funcs of degree p-k
   // a[][] holds those weights, and only two rows are needed, alternating via s1/s2
-  double a[2][BSPLINE_MAX_ORDER];
+  bspl_scalar_t a[2][BSPLINE_MAX_ORDER];
   for (int r = 0; r <= p; r++) {
     int s1 = 0;   // row a_{k-1,j}, read past layer of weights
     int s2 = 1;   // row a_{k,j},   write current layer of weights
@@ -169,7 +207,7 @@ void bspline_basis_derivs_use_ndu(
     a[0][0] = 1.0;
 
     for (int k = 1; k <= kmax; k++) {
-      double d = 0.0;            // accumulates the sum for this derivative
+      bspl_scalar_t d = 0.0;     // accumulates the sum for this derivative
       const int rk = r - k;      // row of the degree p-k function we need
       const int pk = p - k;      // reduced degree == its ndu column
 
