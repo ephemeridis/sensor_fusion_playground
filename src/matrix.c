@@ -6,8 +6,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define SWAP_CHUNK_SIZE 128
-
 bool mat_init_static(mat_t *m, int rows, int cols, mat_scalar_t *data, mat_scalar_t **rowptrs) {
   if (!m || !data || !rowptrs || rows <= 0 || cols <= 0) return false;
   m->heap_alloc = false;
@@ -46,11 +44,13 @@ mat_t *mat_zero(int rows, int cols) {
   return mat_new(rows, cols, 0);
 }
 
-mat_t *mat_identity(int rows, int cols) {
-  mat_t *mat = mat_new(rows, cols, 0);   // NULL if dims invalid or alloc fails
+mat_t *mat_identity(int N) {
+  mat_t *mat = mat_new(N, N, 0);   // NULL if dims invalid or alloc fails
   if (mat == NULL) return NULL;
-  int n = (rows < cols) ? rows : cols;
-  for (int i = 0; i < n; i++) mat->mat[i][i] = 1;
+  if (!mat_set_identity(mat)) {
+    mat_free(mat);
+    return NULL;
+  }
   return mat;
 }
 
@@ -63,6 +63,29 @@ mat_t *mat_copy(mat_t *mat) {
     return NULL;
   }
   return out;
+}
+
+bool mat_fill(mat_t *mat, mat_scalar_t v) {
+  if (mat == NULL) return false;
+  for (int i = 0; i < mat->rows * mat->cols; i++) {
+    mat->_mat_data[i] = v;
+  }
+  return true;
+}
+
+bool mat_set_identity(mat_t *mat) {
+  if (mat == NULL) return false;
+  if (mat->rows != mat->cols) return false;
+  int N = mat->rows;
+
+  // clear the matrix
+  memset(mat->_mat_data, 0, sizeof(mat_scalar_t) * N * N);
+
+  // set the diagonal to one
+  for (int i = 0; i < N; i++) {
+    mat->mat[i][i] = 1;
+  }
+  return true;
 }
 
 bool mat_copy_to(mat_t *dst, mat_t *src) {
@@ -224,6 +247,31 @@ bool mat_transpose_to(mat_t *dst, mat_t *src) {
   return true;
 }
 
+bool mat_mul_transpose_to(mat_t *dst, mat_t *mat1, mat_t *mat2) {
+  // computes dst = mat1 * mat2^T without materialising the transpose
+  if (dst == NULL || mat1 == NULL || mat2 == NULL) return false;
+  // check matmul condition (inner dimensions are both the column counts)
+  if (mat1->cols != mat2->cols) return false;
+  // check output matrix size
+  if (dst->rows != mat1->rows || dst->cols != mat2->rows) return false;
+  // ensure that the destination is not the same as mat1, mat2
+  if (dst->_mat_data == mat1->_mat_data || dst->_mat_data == mat2->_mat_data) return false;
+
+  int inner = mat1->cols;
+  for (int i = 0; i < dst->rows; i++) {
+    const mat_scalar_t *arow = mat1->mat[i];
+    for (int j = 0; j < dst->cols; j++) {
+      const mat_scalar_t *brow = mat2->mat[j];
+      // accumulate in a local so the compiler can keep it in a register
+      mat_scalar_t sum = 0;
+      for (int k = 0; k < inner; k++) sum += arow[k] * brow[k];
+      dst->mat[i][j] = sum;
+    }
+  }
+
+  return true;
+}
+
 bool mat_transpose_inplace_square(mat_t *mat) {
   if (mat == NULL) return false;
   if (mat->rows != mat->cols) return false;
@@ -291,6 +339,7 @@ static void row_swap_process(mat_t *mat) {
   if (mat == NULL) return;
 
   mat_scalar_t *row = mat->_mat_data;
+  mat_scalar_t swap_row_chunk[MAT_SWAP_CHUNK_SIZE];
   for (int i = 0; i < mat->rows; i++) {
     while (row != mat->mat[i]) {
       // swap necessary
@@ -298,14 +347,13 @@ static void row_swap_process(mat_t *mat) {
       size_t ind = (mat->mat[i] - mat->_mat_data) / (size_t)mat->cols;
       // swap the row with this one
       // if the matrix is large, swap in chunks
-      mat_scalar_t row_chunk[SWAP_CHUNK_SIZE > mat->cols ? mat->cols : SWAP_CHUNK_SIZE];
       int left = mat->cols;
       int offset = 0;
       while (left > 0) {
-        int cpy_amt = (SWAP_CHUNK_SIZE > left) ? left : SWAP_CHUNK_SIZE;
-        memcpy(row_chunk, mat->mat[i]+offset, cpy_amt * sizeof(mat_scalar_t));
+        int cpy_amt = (MAT_SWAP_CHUNK_SIZE > left) ? left : MAT_SWAP_CHUNK_SIZE;
+        memcpy(swap_row_chunk, mat->mat[i]+offset, cpy_amt * sizeof(mat_scalar_t));
         memcpy(mat->mat[i]+offset, mat->mat[ind]+offset, cpy_amt * sizeof(mat_scalar_t));
-        memcpy(mat->mat[ind]+offset, row_chunk, cpy_amt * sizeof(mat_scalar_t));
+        memcpy(mat->mat[ind]+offset, swap_row_chunk, cpy_amt * sizeof(mat_scalar_t));
         left -= cpy_amt;
         offset += cpy_amt;
       }
@@ -386,12 +434,14 @@ bool mat_lup_decomp(mat_t *mat, mat_t *l, mat_t *u, mat_t *p) {
 
 bool mat_forward_backward(mat_t *x, mat_t *y, mat_t *l, mat_t *u) {
   // y should equal to Pb or b in PAx = Pb = LUx or Ax = b = LUx
+  // x and y may be the same matrix (solve in place)
   if (x == NULL || y == NULL || l == NULL || u == NULL) return false;
-  // set N to the number of linear equations
+  // set N to the number of linear equations, K to the number of rhs columns
   int N = x->rows;
+  int K = x->cols;
 
-  // check that X and Y are column vectors with N rows
-  if (x->rows != y->rows || x->cols != 1 || y->cols != 1) return false;
+  // check that X and Y are NxK matrices (K = 1 for a single column vector)
+  if (y->rows != N || y->cols != K) return false;
 
   // check that L and U are NxN square matrices
   if (l->rows != N || l->cols != N) return false;
@@ -399,21 +449,30 @@ bool mat_forward_backward(mat_t *x, mat_t *y, mat_t *l, mat_t *u) {
 
   // use x as the working for Ux in forward substitution
   // L_i,i * (UX)_i = Y_i - sum from j=0 to i-1 of L_i,j * (UX)_j
+  // the column loop is innermost so it walks contiguous memory
   for (int n = 0; n < N; n++) {
-    x->mat[n][0] = y->mat[n][0];
+    // guard in case an arbitrary L was passed in
+    if (MAT_FABS(l->mat[n][n]) <= MAT_EPSILON) return false;
+    for (int c = 0; c < K; c++) x->mat[n][c] = y->mat[n][c];
     for (int j = 0; j < n; j++) {
-      x->mat[n][0] -= l->mat[n][j] * x->mat[j][0];
+      // hoisted so it is not reloaded on every column
+      mat_scalar_t l_nj = l->mat[n][j];
+      for (int c = 0; c < K; c++) x->mat[n][c] -= l_nj * x->mat[j][c];
     }
-    x->mat[n][0] /= l->mat[n][n];
+    mat_scalar_t l_nn = l->mat[n][n];
+    for (int c = 0; c < K; c++) x->mat[n][c] /= l_nn;
   }
 
   // now x contains UX
   // we begin backward substitution
   for (int n = N-1; n >= 0; n--) {
-    for (int j = N-1; j > n; j--) {
-      x->mat[n][0] -= u->mat[n][j] * x->mat[j][0];
+    if (MAT_FABS(u->mat[n][n]) <= MAT_EPSILON) return false;
+    for (int j = n + 1; j < N; j++) {
+      mat_scalar_t u_nj = u->mat[n][j];
+      for (int c = 0; c < K; c++) x->mat[n][c] -= u_nj * x->mat[j][c];
     }
-    x->mat[n][0] /= u->mat[n][n];
+    mat_scalar_t u_nn = u->mat[n][n];
+    for (int c = 0; c < K; c++) x->mat[n][c] /= u_nn;
   }
 
   return true;

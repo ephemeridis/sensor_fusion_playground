@@ -9,7 +9,7 @@ int main(void) {
   path_load_fromfile(&new_path, "./path");
   path_print(&new_path);
 
-  mat_t *mat = mat_identity(5, 5);
+  mat_t *mat = mat_identity(5);
   mat_print(mat);
   return 0;
 }

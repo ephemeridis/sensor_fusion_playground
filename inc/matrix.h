@@ -14,6 +14,10 @@ typedef float mat_scalar_t;
 #define MAT_EPSILON FLT_EPSILON
 #endif
 
+#ifndef MAT_SWAP_CHUNK_SIZE
+#define MAT_SWAP_CHUNK_SIZE 32
+#endif
+
 typedef struct {
   int rows;
   int cols;
@@ -33,8 +37,11 @@ mat_init_static(&name, (R), (C), name##_data, name##_rows)
 bool mat_init_static(mat_t *m, int rows, int cols, mat_scalar_t *data, mat_scalar_t **rowptrs);
 mat_t *mat_new(int rows, int cols, mat_scalar_t fill_value);
 mat_t *mat_zero(int rows, int cols);
-mat_t *mat_identity(int rows, int cols);
+mat_t *mat_identity(int N);
 mat_t *mat_copy(mat_t *mat);
+
+bool mat_fill(mat_t *mat, mat_scalar_t v);
+bool mat_set_identity(mat_t *mat);
 bool mat_copy_to(mat_t *dst, mat_t *src);
 
 mat_t *mat_add(mat_t *mat1, mat_t *mat2);
@@ -49,6 +56,7 @@ bool mat_mul_scalar_to(mat_t *dst, mat_t *src, mat_scalar_t scalar);
 
 mat_t *mat_transpose(mat_t *mat);
 bool mat_transpose_to(mat_t *dst, mat_t *src);
+bool mat_mul_transpose_to(mat_t *dst, mat_t *mat1, mat_t *mat2);
 bool mat_transpose_inplace_square(mat_t *mat);
 
 bool mat_lu_decomp(mat_t *mat, mat_t *l, mat_t *u);
