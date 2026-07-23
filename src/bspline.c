@@ -7,15 +7,23 @@ bool bspline_init(bspline_t *spline, int p, int n, int k) {
   spline->n = n;
   spline->k = k;
 
+  spline->heap_alloc = true;
+
   spline->m = n + p + k + 1;
   spline->U = malloc(sizeof(double) * spline->m);
+  if (spline->U == NULL) {
+    bspline_free(spline);
+    return false;
+  }
+  spline->heap_alloc = true;
 
   return true;
 }
 
 void bspline_free(bspline_t *spline) {
-  if (spline) {
-    if (spline->U) free(spline->U);
+  if (spline && spline->heap_alloc) {
+    free(spline->U);
+    spline->U = NULL;
   }
 }
 
@@ -45,7 +53,7 @@ void bspline_basis_funcs(int i, double u, bspline_t *spline, double *N, size_t l
   if (spline->U == NULL || N == NULL || len_N < spline->p+1) return;
 
   // store values to reduce repeat computation
-  double left[spline->p], right[spline->p];
+  double left[BSPLINE_MAX_DEGREE], right[BSPLINE_MAX_DEGREE];
 
   // initial zero-th order basis function
   N[0] = 1.0;
@@ -78,7 +86,7 @@ void bspline_basis_funcs_store_ndu(
   const size_t s = stride_ndu_out;
 
   // store values to reduce repeat computation
-  double left[spline->p], right[spline->p];
+  double left[BSPLINE_MAX_DEGREE], right[BSPLINE_MAX_DEGREE];
 
   // initial zero-th order basis function
   ndu_out[INDEX_BUF(0, 0, s)] = 1.0;
@@ -113,7 +121,7 @@ void bspline_basis_derivs(int i, double u, int N_derivs, bspline_t *spline, doub
   if (rows_deriv_out < (size_t)(N_derivs+1) || stride_deriv_out != (size_t)(spline->p+1)) return;
 
   const size_t stride_ndu = (size_t)(spline->p + 1);
-  double ndu[stride_ndu * stride_ndu];
+  double ndu[BSPLINE_MAX_ORDER * BSPLINE_MAX_ORDER];
 
   bspline_basis_funcs_store_ndu(i, u, spline, ndu, stride_ndu, stride_ndu);
   bspline_basis_derivs_use_ndu(i, u, N_derivs, spline,
@@ -153,7 +161,7 @@ void bspline_basis_derivs_use_ndu(
   // compute the derivatives
   // from Eq. 2.9: the kth derivative is a weighted sum of k+1 basis funcs of degree p-k
   // a[][] holds those weights, and only two rows are needed, alternating via s1/s2
-  double a[2][p+1];
+  double a[2][BSPLINE_MAX_ORDER];
   for (int r = 0; r <= p; r++) {
     int s1 = 0;   // row a_{k-1,j}, read past layer of weights
     int s2 = 1;   // row a_{k,j},   write current layer of weights
