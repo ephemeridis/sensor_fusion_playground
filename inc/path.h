@@ -1,12 +1,24 @@
 #ifndef SENSOR_FUSION_PLAYGROUND_PATH_H
 #define SENSOR_FUSION_PLAYGROUND_PATH_H
 #include <stddef.h>
+#include <stdlib.h>
+
+// scalar type selection, independent of the matrix and bspline modules.
+// define PATH_DOUBLE_PRECISION as a build flag (not in a source file)
+// so every translation unit agrees on the layout of segment_t.
+#ifdef PATH_DOUBLE_PRECISION
+typedef double path_scalar_t;
+#define PATH_STRTOD strtod
+#else
+typedef float path_scalar_t;
+#define PATH_STRTOD strtof
+#endif
 
 typedef struct {
   size_t n_points;
-  double *t;
-  double *x;
-  double *y;
+  path_scalar_t *t;
+  path_scalar_t *x;
+  path_scalar_t *y;
 } segment_t;
 
 typedef struct {

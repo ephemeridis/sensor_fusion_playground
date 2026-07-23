@@ -17,20 +17,46 @@ void __attribute__((weak)) path_warning_handler(const char *function, const char
   fprintf(stderr, "WARN (%s): %s\n", function, msg);
 }
 
+// pull the next comma-separated field out of the current strtok stream.
+// returns false on a missing field as well as an unparseable one, so a
+// truncated line can no longer reach PATH_STRTOD with a NULL pointer.
+static bool next_num(path_scalar_t *out) {
+  char *tok = strtok(NULL, ",");
+  if (tok == NULL) return false;
+  char *end;
+  *out = PATH_STRTOD(tok, &end);
+  return end != tok;
+}
+
+// grow all three point arrays to n entries. each pointer is committed to the
+// segment as soon as its own realloc succeeds, so a later failure never
+// leaves a stale pointer to freed memory for path_free to free again.
+static bool seg_grow(segment_t *seg, size_t n) {
+  path_scalar_t *nt = realloc(seg->t, sizeof(path_scalar_t) * n);
+  if (nt == NULL) return false;
+  seg->t = nt;
+  path_scalar_t *nx = realloc(seg->x, sizeof(path_scalar_t) * n);
+  if (nx == NULL) return false;
+  seg->x = nx;
+  path_scalar_t *ny = realloc(seg->y, sizeof(path_scalar_t) * n);
+  if (ny == NULL) return false;
+  seg->y = ny;
+  return true;
+}
 
 void path_load_fromfile(path_t *path, const char *filename) {
+  if (path == NULL) {
+    path_error_handler(__func__, "path is NULL");
+    return;
+  }
+  path->n_segments = 0;
+  path->segments = NULL;
+
   FILE *fptr = fopen(filename, "r");
   if (fptr == NULL) {
     path_error_handler(__func__, "could not open file");
     return;
   }
-
-  if (path == NULL) {
-    path_error_handler(__func__, "could not allocate path");
-    return;
-  }
-  path->n_segments = 0;
-  path->segments = NULL;
   size_t alloc_segments = 0;
   size_t alloc_points = 0;
   segment_t *curr_seg = NULL;
@@ -50,7 +76,7 @@ void path_load_fromfile(path_t *path, const char *filename) {
     // strip comments
     strtok(buffer, "#");
 
-    double x, y, t;
+    path_scalar_t x = 0, y = 0, t = 0;
     char *endptr;
     bool resume = false;
     bool stop = false;
@@ -71,25 +97,27 @@ void path_load_fromfile(path_t *path, const char *filename) {
     }
 
     curr = strtok(curr, ",");
-    t = strtod(curr, &endptr);
+    if (curr == NULL) continue;
+    t = PATH_STRTOD(curr, &endptr);
     if (endptr == curr) continue;
     if (!resume) {
-      curr = strtok(NULL, ",");
-      x = strtod(curr, &endptr);
-      if (endptr == curr) continue;
-      curr = strtok(NULL, ",");
-      y = strtod(curr, &endptr);
-      if (endptr == curr) continue;
+      if (!next_num(&x)) continue;
+      if (!next_num(&y)) continue;
     } else {
       // if we are resuming, begin the X, Y coordinates from the point where the last segment ended
-      if (path->n_segments <= 0) {
+      if (path->n_segments == 0) {
         path_error_handler(__func__, "invalid RESUME token");
         path_free(path); fclose(fptr);
         return;
       }
-      size_t last = path->segments[path->n_segments-1].n_points-1;
-      x = path->segments[path->n_segments-1].x[last];
-      y = path->segments[path->n_segments-1].y[last];
+      segment_t *prev = &path->segments[path->n_segments-1];
+      if (prev->n_points == 0) {
+        path_error_handler(__func__, "RESUME from empty segment");
+        path_free(path); fclose(fptr);
+        return;
+      }
+      x = prev->x[prev->n_points-1];
+      y = prev->y[prev->n_points-1];
     }
 
     if (curr_seg == NULL) {
@@ -125,20 +153,11 @@ void path_load_fromfile(path_t *path, const char *filename) {
     if (alloc_points == 0) realloc_n_pts = 1;
     else if (curr_seg->n_points+1 >= alloc_points) realloc_n_pts *= 2;
     if (realloc_n_pts != alloc_points) {
-      double *new_t = realloc(curr_seg->t, sizeof(double) * realloc_n_pts);
-      double *new_x = realloc(curr_seg->x, sizeof(double) * realloc_n_pts);
-      double *new_y = realloc(curr_seg->y, sizeof(double) * realloc_n_pts);
-      if (new_t == NULL || new_x == NULL || new_y == NULL) {
+      if (!seg_grow(curr_seg, realloc_n_pts)) {
         path_error_handler(__func__, "could not reallocate points in segment");
         path_free(path); fclose(fptr);
-        if (new_t != NULL) free(new_t);
-        if (new_x != NULL) free(new_x);
-        if (new_y != NULL) free(new_y);
         return;
       }
-      curr_seg->t = new_t;
-      curr_seg->x = new_x;
-      curr_seg->y = new_y;
       alloc_points = realloc_n_pts;
     }
 
@@ -150,49 +169,43 @@ void path_load_fromfile(path_t *path, const char *filename) {
 
     if (stop) {
       // end the current segment
-      double *new_t = realloc(curr_seg->t, sizeof(double) * curr_seg->n_points);
-      double *new_x = realloc(curr_seg->x, sizeof(double) * curr_seg->n_points);
-      double *new_y = realloc(curr_seg->y, sizeof(double) * curr_seg->n_points);
-      if (new_t == NULL || new_x == NULL || new_y == NULL) {
-        path_error_handler(__func__, "could not reallocate points in segment");
+      // trim the spare capacity
+      if (!seg_grow(curr_seg, curr_seg->n_points)) {
+        path_error_handler(__func__, "could not shrink points in segment");
         path_free(path); fclose(fptr);
-        if (new_t != NULL) free(new_t);
-        if (new_x != NULL) free(new_x);
-        if (new_y != NULL) free(new_y);
         return;
       }
-      curr_seg->t = new_t;
-      curr_seg->x = new_x;
-      curr_seg->y = new_y;
       curr_seg = NULL;
     }
 
   }
 
-  segment_t *new_segments = realloc(path->segments, sizeof(segment_t) * path->n_segments);
-  if (new_segments == NULL) {
-    path_error_handler(__func__, "could not reallocate segments");
-    path_free(path); fclose(fptr);
-    return;
+  if (path->n_segments > 0) {
+    segment_t *new_segments = realloc(path->segments, sizeof(segment_t) * path->n_segments);
+    if (new_segments == NULL) {
+      path_error_handler(__func__, "could not reallocate segments");
+      path_free(path); fclose(fptr);
+      return;
+    }
+    path->segments = new_segments;
   }
 
-  path->segments = new_segments;
   fclose(fptr);
 }
 
 void path_free(path_t *path) {
-  if (path) {
-    // path is allocated
-    // loop through the segments to free all the points
-    if (path->segments) {
-      for (size_t i = 0; i < path->n_segments; i++) {
-        if (path->segments[i].x) free(path->segments[i].x);
-        if (path->segments[i].y) free(path->segments[i].y);
-        if (path->segments[i].t) free(path->segments[i].t);
-      }
-      free(path->segments);
+  if (path == NULL) return;
+  if (path->segments) {
+    for (size_t i = 0; i < path->n_segments; i++) {
+      free(path->segments[i].x);
+      free(path->segments[i].y);
+      free(path->segments[i].t);
     }
+    free(path->segments);
   }
+  // leave the struct safe to free again
+  path->segments = NULL;
+  path->n_segments = 0;
 }
 
 void path_print(path_t *path) {
@@ -220,9 +233,9 @@ void path_print_prec(path_t *path, const int precision) {
       return;
     }
     for (size_t j = 0; j < seg->n_points; j++) {
-      int lt = snprintf(NULL, 0, "%.*lf", precision, seg->t[j]);
-      int lx = snprintf(NULL, 0, "%.*lf", precision, seg->x[j]);
-      int ly = snprintf(NULL, 0, "%.*lf", precision, seg->y[j]);
+      int lt = snprintf(NULL, 0, "%.*lf", precision, (double)seg->t[j]);
+      int lx = snprintf(NULL, 0, "%.*lf", precision, (double)seg->x[j]);
+      int ly = snprintf(NULL, 0, "%.*lf", precision, (double)seg->y[j]);
       if (lt > w_t) w_t = lt;
       if (lx > w_x) w_x = lx;
       if (ly > w_y) w_y = ly;
@@ -236,9 +249,9 @@ void path_print_prec(path_t *path, const int precision) {
     printf("  SEGMENT %zu\n", i);
     for (size_t j = 0; j < seg->n_points; j++) {
       printf("    t: %*.*lf, x: %*.*lf, y: %*.*lf\n",
-             w_t, precision, seg->t[j],
-             w_x, precision, seg->x[j],
-             w_y, precision, seg->y[j]);
+             w_t, precision, (double)seg->t[j],
+             w_x, precision, (double)seg->x[j],
+             w_y, precision, (double)seg->y[j]);
     }
   }
 }
