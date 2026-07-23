@@ -1,0 +1,21 @@
+# this is a comment
+# it is ignored by the parser
+# data format is <time_s>, <x_pos>, <y_pos>
+# the path starts with the velocity and acceleration
+# constrained to zero at the start of each segment
+0.0, 1.0, 1.0
+1.5, 3.0, 4.0
+2.3, 2.0, 1.0
+3.2, -1.0, -2.0 # comments can be at the end of points too
+STOP 4.1, -1.2, -2.0 # this denotes that the path should stop at this point
+# stopping means that the velocity and acceleration should
+# reach zero at this point and time
+# you can start again at another time
+
+RESUME 5.0 # but the position cannot be specified
+# it uses the position from the previous STOP
+5.6, -2.0, 0.0
+6.7, -3.3, 1.6
+10.0, -4.3, 4.5
+12.5, -5.0, 6.0
+STOP 15.0, -5.0, 4.3
