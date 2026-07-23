@@ -14,6 +14,8 @@ typedef float mat_scalar_t;
 #define MAT_EPSILON FLT_EPSILON
 #endif
 
+// swap scratch buffer size for
+// chunked memory swapping when re-ordering rows in LUP pivoting
 #ifndef MAT_SWAP_CHUNK_SIZE
 #define MAT_SWAP_CHUNK_SIZE 32
 #endif
@@ -25,6 +27,22 @@ typedef struct {
   mat_scalar_t **mat;
   mat_scalar_t *_mat_data;
 } mat_t;
+
+// debug functions for printing the matrix
+#ifndef MAT_NO_PRINT
+
+// whether to use uniform sizing for all the cols or to
+// dynamically size based on the number to print
+#ifndef MAT_PRINT_COLS_UNIFORM_WIDTH
+#ifndef MAT_MAX_PRINT_COLS
+#define MAT_MAX_PRINT_COLS 32
+#endif
+#endif
+
+void mat_print(mat_t *mat);
+void mat_print_prec(mat_t *mat, int precision);
+
+#endif
 
 #define MAT_STATIC_STORAGE(name, R, C)          \
 static mat_scalar_t name##_data[(R) * (C)];   \
@@ -65,8 +83,5 @@ bool mat_lup_decomp(mat_t *mat, mat_t *l, mat_t *u, mat_t *p);
 bool mat_forward_backward(mat_t *x, mat_t *y, mat_t *l, mat_t *u);
 
 void mat_free(mat_t *mat);
-
-void mat_print(mat_t *mat);
-void mat_print_prec(mat_t *mat, int precision);
 
 #endif //SENSOR_FUSION_PLAYGROUND_MATRIX_H

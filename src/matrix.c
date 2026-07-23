@@ -486,6 +486,7 @@ void mat_free(mat_t *mat) {
   }
 }
 
+#ifndef MAT_NO_PRINT
 void mat_print(mat_t *mat) {
   mat_print_prec(mat, 3);
 }
@@ -493,13 +494,26 @@ void mat_print(mat_t *mat) {
 void mat_print_prec(mat_t *mat, int precision) {
   assert(mat != NULL);
 
-  int max_widths[mat->cols];
+#ifdef MAT_PRINT_COLS_UNIFORM_WIDTH
+  int max_width = 0;
+#else
+  if (mat->cols > MAT_MAX_PRINT_COLS) {
+    printf("MAT (R: %d, C: %d), too many cols\n", mat->rows, mat->cols);
+    return;
+  }
+
+  int max_widths[MAT_MAX_PRINT_COLS];
   for (int j = 0; j < mat->cols; j++) max_widths[j] = 0;
+#endif
 
   for (int i = 0; i < mat->rows; i++) {
     for (int j = 0; j < mat->cols; j++) {
       int width = snprintf(NULL, 0, "%.*lf", precision, mat->mat[i][j]);
+#ifdef MAT_PRINT_COLS_UNIFORM_WIDTH
+      if (width > max_width) max_width = width;
+#else
       if (width > max_widths[j]) max_widths[j] = width;
+#endif
     }
   }
 
@@ -507,8 +521,14 @@ void mat_print_prec(mat_t *mat, int precision) {
   for (int i = 0; i < mat->rows; i++) {
     printf("  [ ");
     for (int j = 0; j < mat->cols; j++) {
-      printf("%*.*lf%s", max_widths[j], precision, mat->mat[i][j], (j < mat->cols - 1) ? ", " : "");
+#ifdef MAT_PRINT_COLS_UNIFORM_WIDTH
+      int w = max_width;
+#else
+      int w = max_widths[j];
+#endif
+      printf("%*.*lf%s", w, precision, mat->mat[i][j], (j < mat->cols - 1) ? ", " : "");
     }
     printf(" ]\n");
   }
 }
+#endif
